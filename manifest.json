@@ -32,27 +32,32 @@
     {
       "matches": ["*://duckduckgo.com/*"],
       "css": ["build/searchInjection.css"],
-      "js": ["build/searchInjection.js"]
+      "js": ["build/searchInjection.js"],
+      "run_at": "document_start"
     },
     {
       "matches": ["*://search.brave.com/*"],
       "css": ["build/searchInjection.css"],
-      "js": ["build/searchInjection.js"]
+      "js": ["build/searchInjection.js"],
+      "run_at": "document_start"
     },
     {
       "matches": ["*://kagi.com/*"],
       "css": ["build/searchInjection.css"],
-      "js": ["build/searchInjection.js"]
+      "js": ["build/searchInjection.js"],
+      "run_at": "document_start"
     },
     {
       "matches": ["*://www.qwant.com/*"],
       "css": ["build/searchInjection.css"],
-      "js": ["build/searchInjection.js"]
+      "js": ["build/searchInjection.js"],
+      "run_at": "document_start"
     },
     {
       "matches": ["*://*/search?*", "*://*/search"],
       "css": ["build/searchInjection.css"],
-      "js": ["build/searchInjection.js"]
+      "js": ["build/searchInjection.js"],
+      "run_at": "document_start"
     },
     {
       "matches": [
@@ -248,7 +253,8 @@
         "*://*.google.cat/*"
       ],
       "css": ["build/searchInjection.css"],
-      "js": ["build/searchInjection.js"]
+      "js": ["build/searchInjection.js"],
+      "run_at": "document_start"
     }
   ],
 

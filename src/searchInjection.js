@@ -1,365 +1,363 @@
-function isChrome() {
-  return typeof chrome !== "undefined";
-}
+// @ts-check
 
-function getBrowser() {
-  return isChrome() ? chrome : browser;
-}
+/** @typedef {string} SearchRequest */
 
-/* Sanitise input to prevent unwanted injection of html or even javascript 
-  through linkding search results, e.g. in the bookmark title or description 
-*/
-function escapeHTML(str) {
-  let p = document.createElement("p");
-  p.appendChild(document.createTextNode(str));
-  return p.innerHTML;
-}
+// TODO: definition of the actual type instead of using any
+/** @typedef {any} SearchResponse */
 
-const browser = getBrowser();
-
-const port = browser.runtime.connect({ name: "port-from-cs" });
-let searchEngine;
-if (document.location.hostname.match(/duckduckgo\.com/)) {
-  searchEngine = "duckduckgo";
-} else if (document.location.hostname.match(/google/)) {
-  searchEngine = "google";
-} else if (document.location.hostname.match(/search\.brave\.com/)) {
-  searchEngine = "brave";
-} else if (document.location.hostname.match(/kagi\.com/)) {
-  searchEngine = "kagi";
-} else if (document.location.href.match(/http.?:\/\/.+\/search/)) {
-  searchEngine = "searx";
-} else if (document.location.hostname.match(/qwant\.com/)) {
-  searchEngine = "qwant";
-} else {
-  console.debug("Linkding-Injector extension: unknown search engine.");
+/**
+ * @param {string} input
+ * @returns {string}
+ */
+function escapeHTML(input) {
+	let p = document.createElement("p");
+	p.appendChild(document.createTextNode(input));
+	return p.innerHTML;
 }
 
 /**
- * Location of the injection
  * @typedef {Object} InjectionLocation
- * @property {string} className - name of the class to be applied to the injected element, based on the location
- * @property {(element: Element, location: InjectionLocation) => void} transformation - transformation on the injected element itself
+ * @property {string} name
+ * @property {(injectedElement: Element) => void} transformation
+ * @property {(injectionRoot: Element, searchEngine: SearchEngine, injectionElement: Element) => void} insert
  */
 
-/**
- * List of the possible injection locations
- * @type { { [key: string]: InjectionLocation } }
- */
-const injectionLocations = {
-  sidebar: {
-    className: "location-sidebar",
-    transformation: (element, location) => {
-      element.classList.add(location.className);
-    }
-  },
-  top: {
-    className: "location-top",
-    transformation: (element, location) => {
-      element.classList.add(location.className);
-    }
-  }
-};
-
-/**
- * @param {Element} element
- * @param {InjectionLocation} location
- */
-function addLocationClass(element, location) {
-  element.classList.add(location.className)
-}
-
-/**
- * Selector for the container to inject into
- * @typedef {Object} InjectionContainerQuery
- * @property {(() => void) | null} transformation - transformation to apply before using the selector
- * @property {string} selector - the CSS selector to use for querying the container
- * @property {(() => void) | null} reverseTransformation - reversion of the transformation if the selector still wasn't found
- * @property {InjectionLocation} location - location, where the element will be injected in
- */
-
-/**
- * CSS selectors for finding the sidebar to later inject into
- * @type { { [key: string]: Array.<InjectionContainerQuery> } }
- */
-const sidebarSelectors = {
-  duckduckgo: [
-    {
-      transformation: null,
-      selector: "section[data-area=sidebar]",
-      reverseTransformation: null,
-      location: injectionLocations.sidebar
-    },
-    {
-      transformation: null,
-      selector: "section[data-area=mainline]",
-      reverseTransformation: null,
-      location: injectionLocations.top
-    }
-  ],
-  google: [
-    {
-      transformation: null,
-      selector: "#rhs",
-      reverseTransformation: null,
-      location: injectionLocations.sidebar
-    },
-    {
-      // Google completely omits the sidebar container if there is no content.
-      // We need to add it manually before injection
-      transformation: () => {
-        const sidebarContainerString = `
-        <div id="rhs" class="TQc1id hSOk2e rhstc4"></div>`;
-
-        const parser = new DOMParser();
-        const sidebarContainer = parser.parseFromString(
-          sidebarContainerString,
-          "text/html"
-        );
-        const container = document.querySelector("#rcnt");
-        const rhsElement = sidebarContainer.body.querySelector("div#rhs");
-        if (rhsElement !== null) {
-          container?.appendChild(rhsElement);
-        }
-      },
-      selector: "#rhs",
-      reverseTransformation: () => {
-        const element = document.querySelector("#rhs");
-        element?.parentElement?.removeChild(element);
-      },
-      location: injectionLocations.sidebar
-    },
-    {
-      transformation: null,
-      selector: "#topstuff",
-      reverseTransformation: null,
-      location: injectionLocations.top
-    }
-  ],
-  brave: [
-    {
-      transformation: null,
-      selector: "aside.sidebar",
-      reverseTransformation: null,
-      location: injectionLocations.sidebar
-    }
-  ],
-  searx: [
-    {
-      transformation: null,
-      selector: "#sidebar",
-      reverseTransformation: null,
-      location: injectionLocations.sidebar
-    }
-  ],
-  kagi: [
-    {
-      transformation: null,
-      selector: ".right-content-box > ._0_right_sidebar",
-      reverseTransformation: null,
-      location: injectionLocations.sidebar
-    }
-  ],
-  qwant: [
-    {
-      transformation: null,
-      selector: ".is-sidebar",
-      reverseTransformation: null,
-      location: injectionLocations.sidebar
-    }
-  ],
-};
-
-// When background script answers with results, construct html for the result box
-port.onMessage.addListener(function (m) {
-  const parser = new DOMParser();
-  let themeClass;
-  let htmlString = "";
-  let html;
-
-  // In case we don't get results, but a message from the background script,
-  // display it. This is the case before proper configuration
-  if ("message" in m) {
-    const showLogo = m.config?.showLogo ?? true; // If configuration is not done yet, m.config is undefined
-
-    htmlString = `
-    <div id="bookmark-list-container" class="${searchEngine}">
-      <div id="navbar">
-        <a id="ld-logo">
-          ${showLogo ? `<img src="${browser.runtime.getURL("icons/logo.svg")}" class="setup" />` : ""}
-          <h1>linkding injector</h1>
-        </a>
-        <a id="ld-options" class="openOptions">
-          <img class="ld-settings" src=${browser.runtime.getURL(
-            "icons/cog.svg"
-          )} />
-        </a>
-      </div>
-      <div id="error-message">
-        ${m.message}
-      </div>
-    </div>
-    `;
-
-    // Convert the above string into a DOM document
-    html = parser.parseFromString(htmlString, "text/html");
-  }
-  // If there is no message and there are actual results display them
-  else if (m.results.length > 0) {
-    // If the theme for a search engine is not set to auto, we need to add
-    // specific CSS classes
-    // Get the theme configuration
-    const themes = {
-      duckduckgo: m.config.themeDuckduckgo,
-      google: m.config.themeGoogle,
-      brave: m.config.themeBrave,
-      searx: m.config.themeSearx,
-      kagi: m.config.themeKagi,
-      qwant: m.config.themeQwant,
-    };
-
-    const theme = themes[searchEngine];
-
-    if (theme == "auto") {
-      themeClass = ""; // automatic theme detection
-    } else {
-      themeClass = theme; // "dark" for dark theme, "light" for light theme
-    }
-
-    // URL of the configured linkding instance (including search term)
-    let linkdingUrl =
-      m.config.baseUrl +
-      (searchTerm.length > 0 ? `/bookmarks?q=${searchTerm}` : "/");
-
-    htmlString += `
-    <div id="bookmark-list-container" class="${searchEngine} ${themeClass}">
-      <div id="navbar">
-        <a id="ld-logo" href="${linkdingUrl}">
-          ${m.config.showLogo ? `<img src="${browser.runtime.getURL("icons/logo.svg")}" />` : ""}
-          <h1>linkding injector</h1>
-        </a>
-        <div id="results_amount">
-          Found <span>${m.results.length}</span> ${
-      m.results.length == 1 ? "result" : "results"
-    }.
-        </div>
-        <a id="ld-options" class="openOptions">
-          <img class="ld-settings" src=${browser.runtime.getURL(
-            "icons/cog.svg"
-          )} />
-        </a>
-      </div>
-    `;
-
-    htmlString += `<ul id="bookmark-list">`;
-
-    m.results.forEach((bookmark) => {
-      htmlString += `
-        <li>
-          <div class="title">
-            <a
-              href="${bookmark.url}"
-              target=${m.config.openLinkType == "sameTab" ? "_self" : "_blank"}
-              rel="noopener"
-              >${escapeHTML(bookmark.title)}</a
-            >
-          </div>
-          <div class="description ${themeClass}">
-            <span class="tags">
-              ${bookmark.tags
-                .map((tag) => {
-                  return "<a>#" + escapeHTML(tag) + "</a>";
-                })
-                .join(" ")}
-              </a>
-            </span>
-    
-            ${bookmark.tags.length > 0 ? "|" : ""}
-    
-            <span>
-              ${escapeHTML(bookmark.description)}
-            </span>
-          </div>
-        </li>`;
-    });
-    htmlString += `</ul></div>`;
-  } else {
-    console.error("linkding injector: no message and no search results");
-    return;
-  }
-
-  // Finding the sidebar
-  const sidebarSelector = sidebarSelectors[searchEngine] ?? [];
-  let sidebar = null;
-  let injectionLocation = null;
-
-  for (const injectionContainerQuery of sidebarSelector) {
-    if (injectionContainerQuery.transformation !== null) {
-      injectionContainerQuery.transformation();
-    }
-    sidebar = document.querySelector(injectionContainerQuery.selector);
-    const isVisible = sidebar?.checkVisibility() ?? false;
-
-    if (sidebar !== null && isVisible) {
-      injectionLocation = injectionContainerQuery.location;
-      break;
-    }
-
-    if(injectionContainerQuery.reverseTransformation !== null) {
-      injectionContainerQuery.reverseTransformation();
-    }
-  }
-
-  // Convert the html string into a DOM document
-  html = parser.parseFromString(htmlString, "text/html");
-  // The actual injection
-  if (document.querySelector("#bookmark-list-container") == null) {
-    const injectedElement = html.body.querySelector("div#bookmark-list-container");
-    if (injectionLocation !== null && injectedElement !== null) {
-      injectionLocation.transformation(injectedElement, injectionLocation);
-      sidebar?.prepend(injectedElement);
-    }
-  }
-
-  // Event listeners for opening the extension options. These can only be opened
-  // by the background script, so we need to send a message to it
-  document.querySelectorAll(".openOptions").forEach((el) => {
-    el.addEventListener("click", () => {
-      port.postMessage({ action: "openOptions" });
-    });
-  });
+///** @type { { [key: string]: InjectionLocation } } */
+const injectionLocations = /** @type {const} */ Object.freeze({
+	/** @type {InjectionLocation} */ top: {
+		name: "top",
+		transformation: (element) => {
+			element.classList.add("injection-location-top");
+		},
+		insert: (injectionRoot, _, injectionElement) => {
+			injectionRoot.prepend(injectionElement);
+		}
+	},
+	/** @type {InjectionLocation} */ sidebar: {
+		name: "sidebar",
+		transformation: (element) => {
+			element.classList.add("injection-location-sidebar");
+		},
+		insert: (injectionRoot, _, injectionElement) => {
+			injectionRoot.prepend(injectionElement);
+		}
+	},
+	// TODO: decide whether it is better to have brave as an extra InjectionLocation here,
+	// or if the setTimeout functionality should be handled through an `if` based on the (currently unused) `searchEngine` parameter
+	/** @type {InjectionLocation} */ sidebarBrave: {
+		name: "sidebar",
+		transformation: (element) => {
+			element.classList.add("injection-location-sidebar");
+		},
+		insert: (injectionRoot, _, injectionElement) => {
+			// Brave search seems to remove the injection box if it is injected too soon.
+			// Wait a bit before injecting.
+			window.setTimeout(() => {
+				injectionRoot.prepend(injectionElement);
+			}, 1600);
+		}
+	}
 });
 
-// Start the search by sending a message to background.js with the search term
-let queryString = location.search;
-let urlParams = new URLSearchParams(queryString);
-let searchTerm = escapeHTML(urlParams.get("q"));
-if (searchEngine == "searx") {
-  searchTerm = escapeHTML(document.querySelector("input#q").value);
+/**
+ * @typedef {Object} InjectionContainerQueryResult
+ * @property {Element} element
+ * @property {InjectionLocation} location
+ */
+
+/**
+ * @typedef {Object} InjectionContainerQuery
+ * @property {string} name
+ * @property {() => Promise<InjectionContainerQueryResult | Error>} tryResolve
+ */
+
+/**
+ * @typedef {Object} SearchEngine
+ * @property {string} name
+ * @property {(location: Location) => SearchRequest} getSearchTerm
+ * @property {(location: Location) => boolean} isMatch
+ * @property {(injectedElement: Element) => void} transformation
+ * @property {Array.<InjectionContainerQuery>} injectionQueries
+ */
+
+/**
+ * @param {string} className
+ * @returns {() => Promise<InjectionContainerQueryResult | Error>}
+ */
+function defaultTryResolveFunction(className) {
+	return () => new Promise((resolve, _) => {
+		const injectionRoot = document.querySelector(className);
+		const isVisible = injectionRoot?.checkVisibility() ?? false;
+		if(injectionRoot === null) {
+			return resolve(new Error("Linkding-Injector: injection root does not exist."));
+		}
+		if(!isVisible) {
+			return resolve(new Error("Linkding-Injector: injection root is not visible."));
+		}
+
+		resolve({
+			element: injectionRoot,
+			location: injectionLocations.sidebar
+		});
+	});
 }
 
-if (searchEngine == "brave") {
-  // Brave search seems to remove the injection box if it is injected too soon.
-  // Wait a bit before injecting.
-  setTimeout(function () {
-    port.postMessage({ searchTerm: searchTerm });
-  }, 1600);
-} else if (searchEngine == "qwant") {
-  // Qwant asynchronously loads the sidebar. We need to watch for when the
-  // sidebar is loaded and only then start the injection
-  const qwantObserver = new MutationObserver((mutations, observer) => {
-    // TODO: just using the first element of the array doesn't seem like a good idea
-    if (document.querySelector(sidebarSelectors["qwant"][0].selector)) {
-      port.postMessage({ searchTerm: searchTerm });
-      observer.disconnect(); // Stop observing after the element appears
-    }
-  });
+///** @type { { [key: string]: SearchEngine } } */
+const searchEngines = /** @type {const} */ Object.freeze({
+	/** @type {SearchEngine} */ duckduckgo: {
+		name: "duckduckgo",
+		getSearchTerm: (loc) => {
+			const queryString = loc.search;
+			const urlParams = new URLSearchParams(queryString);
+			const searchTerm = escapeHTML(urlParams.get("q") ?? "");
+			return searchTerm;
+		},
+		isMatch: (loc) => {
+			return loc.hostname.match(/duckduckgo\.com/) !== null;
+		},
+		transformation: (element) => {
+			element.classList.add("search-engine-duckduckgo");
+		},
+		injectionQueries: [{
+			name: "duckduckgo-sidebar",
+			tryResolve: defaultTryResolveFunction("section[data-area=sidebar]")
+		}, {
+			name: "duckduckgo-top",
+			tryResolve: defaultTryResolveFunction("section[data-area=mainline]")
+		}]
+	},
+	/** @type {SearchEngine} */ google: {
+		name: "google",
+		getSearchTerm: (loc) => {
+			const queryString = loc.search;
+			const urlParams = new URLSearchParams(queryString);
+			const searchTerm = escapeHTML(urlParams.get("q") ?? "");
+			return searchTerm;
+		},
+		isMatch: (loc) => {
+			return loc.hostname.match(/google/) !== null;
+		},
+		transformation: (element) => {
+			element.classList.add("search-engine-google");
+		},
+		injectionQueries: [{
+			name: "google-sidebar",
+			tryResolve: () => {
+				return new Promise((resolve, _) => {
+					// TODO: handle #rhs element not existing
+					const injectionRoot = document.querySelector("#rhs");
+					const isVisible = injectionRoot?.checkVisibility() ?? false;
+					if(injectionRoot === null) {
+						return resolve(new Error("Linkding-Injector: injection root does not exist."));
+					}
+					if(!isVisible) {
+						return resolve(new Error("Linkding-Injector: injection root is not visible."));
+					}
 
-  qwantObserver.observe(document.body, {
-    childList: true,
-    subtree: true
-  });
-} else {
-  port.postMessage({ searchTerm: searchTerm });
+					resolve({
+						element: injectionRoot,
+						location: injectionLocations.sidebar
+					});
+				});
+			}
+		}, {
+			name: "google-top",
+			tryResolve: defaultTryResolveFunction("#topstuff")
+		}]
+	},
+	/** @type {SearchEngine} */ brave: {
+		name: "brave",
+		getSearchTerm: (loc) => {
+			const queryString = loc.search;
+			const urlParams = new URLSearchParams(queryString);
+			const searchTerm = escapeHTML(urlParams.get("q") ?? "");
+			return searchTerm;
+		},
+		isMatch: (loc) => {
+			return loc.hostname.match(/search\.brave\.com/) !== null;
+		},
+		transformation: (element) => {
+			element.classList.add("search-engine-brave");
+		},
+		injectionQueries: [{
+			name: "brave-sidebar",
+			tryResolve: defaultTryResolveFunction("aside.sidebar")
+		}]
+	},
+	/** @type {SearchEngine} */ kagi: {
+		name: "kagi",
+		getSearchTerm: (loc) => {
+			const queryString = loc.search;
+			const urlParams = new URLSearchParams(queryString);
+			const searchTerm = escapeHTML(urlParams.get("q") ?? "");
+			return searchTerm;
+		},
+		isMatch: (loc) => {
+			return loc.hostname.match(/kagi\.com/) !== null;
+		},
+		transformation: (element) => {
+			element.classList.add("search-engine-kagi");
+		},
+		injectionQueries: [{
+			name: "kagi-sidebar",
+			tryResolve: defaultTryResolveFunction(".right-content-box > ._0_right_sidebar")
+		}]
+	},
+	/** @type {SearchEngine} */ searx: {
+		name: "searx",
+		getSearchTerm: (_) => {
+			/** @type {HTMLInputElement | null} */
+			const searchInput = document.querySelector("input#q");
+			if(searchInput === null) {
+				throw new Error("Linkding-Injector: search input not found.");
+			}
+			const searchTerm = escapeHTML(searchInput.value);
+			return searchTerm;
+		},
+		isMatch: (loc) => {
+			return loc.href.match(/http.?:\/\/.+\/search/) !== null;
+		},
+		transformation: (element) => {
+			element.classList.add("search-engine-searx");
+		},
+		injectionQueries: [{
+			name: "searx-sidebar",
+			tryResolve: defaultTryResolveFunction("#sidebar")
+		}]
+	},
+	/** @type {SearchEngine} */ qwant: {
+		name: "qwant",
+		getSearchTerm: (loc) => {
+			const queryString = loc.search;
+			const urlParams = new URLSearchParams(queryString);
+			const searchTerm = escapeHTML(urlParams.get("q") ?? "");
+			return searchTerm;
+		},
+		isMatch: (loc) => {
+			return loc.hostname.match(/qwant\.com/) !== null;
+		},
+		transformation: (element) => {
+			element.classList.add("search-engine-qwant");
+		},
+		injectionQueries: [{
+			name: "qwant-sidebar",
+			tryResolve: () => {
+				return new Promise((resolve, _) => {
+					// Qwant asynchronously loads the sidebar. We need to watch for when the
+					// sidebar is loaded and only then start the injection
+					// TODO: Add a timeout for the observer?
+					const qwantObserver = new MutationObserver((_, observer) => {
+						const injectionRoot = document.querySelector(".is-sidebar");
+						const isVisible = injectionRoot?.checkVisibility() ?? false;
+
+						if(injectionRoot !== null && !isVisible) {
+							return resolve(new Error("Linkding-Injector: injection root is not visible."));
+						} else if(injectionRoot !== null){
+							observer.disconnect();
+							resolve({
+								element: injectionRoot,
+								location: injectionLocations.sidebar
+							});
+						}
+					});
+
+					qwantObserver.observe(document.body, {
+						childList: true,
+						subtree: true
+					});
+
+				});
+			}
+		}]
+	}
+});
+
+/**
+ * @param {Location} location
+ * @returns {SearchEngine}
+ */
+function getSearchEngine(location) {
+	for(const searchEngine of Object.values(searchEngines)) {
+		if(searchEngine.isMatch(location)) {
+			return searchEngine;
+		}
+	}
+
+	throw new Error("Linkding-Injector: unknown search engine.");
 }
 
+/**
+ * @param {SearchRequest} searchTerm
+ * @returns {Promise<SearchResponse>}
+ */
+function executeSearch(searchTerm) {
+	return new Promise((resolve, reject) => {
+		if (typeof browser !== "undefined") {
+			const port = browser.runtime.connect({ name: "port-from-cs" });
+			try {
+				port.onMessage.addListener((message) => {
+					resolve(message);
+				});
+				port.postMessage({ searchTerm: searchTerm });
+			} catch(err) {
+				reject(err);
+			}
+		} else if(typeof chrome !== "undefined") {
+			const port = chrome.runtime.connect({ name: "port-from-cs" });
+			try {
+				port.onMessage.addListener((message) => {
+					resolve(message);
+				});
+				port.postMessage({ searchTerm: searchTerm });
+			} catch(err) {
+				reject(err);
+			}
+		} else {
+			reject(new Error("Linkding-Injector: neither `browser` nor `chrome` namespace was found."));
+		}
+	});
+}
+
+/**
+ * @param {Event} _
+ */
+async function injectResults(_) {
+	const searchResult = await search;
+	const injectionQueryResult = await searchEngine.injectionQueries.reduce(async (/** @type {Promise<InjectionContainerQueryResult | Error | null>} */ previousResult, current) => {
+		return previousResult
+			.then(async (val) => {
+				if(val !== null && !(val instanceof Error)) {
+					return val;
+				}
+
+				return await current.tryResolve();
+			})
+			.catch(async (_) => {
+				return await current.tryResolve();
+			})
+	}, Promise.resolve(null));
+
+	if(injectionQueryResult instanceof Error) {
+		throw injectionQueryResult;
+	}
+
+	if(injectionQueryResult === null) {
+		throw new Error("Linkding-Injector: no valid injection location found.");
+	}
+
+	const injectionRoot = injectionQueryResult.element;
+	const injectionLocation = injectionQueryResult.location;
+
+	let injectionElement = document.createElement("p");
+	searchEngine.transformation(injectionElement);
+	injectionLocation.transformation(injectionElement);
+
+	// TODO: Just inserting the result as json for now. Instead, this is where the injection element should be built.
+	injectionElement.innerText = JSON.stringify(searchResult);
+
+	injectionLocation.insert(injectionRoot, searchEngine, injectionElement);
+}
+
+const searchEngine = getSearchEngine(window.location);
+const search = executeSearch(searchEngine.getSearchTerm(window.location));
+window.addEventListener("load", injectResults);

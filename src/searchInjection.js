@@ -332,9 +332,6 @@ async function injectResults(_) {
 
 				return await current.tryResolve();
 			})
-			.catch(async (_) => {
-				return await current.tryResolve();
-			})
 	}, Promise.resolve(null));
 
 	if(injectionQueryResult instanceof Error) {

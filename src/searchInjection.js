@@ -1,10 +1,4 @@
 // @ts-check
-// TODO: Check if there is some other way to fix redeclaration of constants than wrapping in this if
-if("__LINKDING_INJECTOR_EXTENSION_LOADED__" in window) {
-
-} else {
-window["__LINKDING_INJECTOR_EXTENSION_LOADED__"] = true;
-
 /**
  * @typedef {string} SearchRequest type of the request we send to fetch our linkding bookmarks
  */
@@ -59,11 +53,11 @@ function escapeHTML(input) {
 }
 
 /**
- * @typedef {(injectionRoot: Element, searchEngine: SearchEngine, injectionElement: Element) => void} InsertFunction function for inserting the injection root into the DOM
+ * @typedef {(injectionRoot: Element, searchEngine: SearchEngine, injectionElement: Element, existingInjectionElement: Element | null) => void} InsertFunction function for inserting the injection root into the DOM
  */
 
 /**
- * @typedef {(injectionRoot: Element, injectionElement: Element) => void} InsertOverrideFunction function to override the default insertion for a search engine and location pair
+ * @typedef {(injectionRoot: Element, injectionElement: Element, existingInjectionElement: Element | null) => void} InsertOverrideFunction function to override the default insertion for a search engine and location pair
  */
 
 /**
@@ -74,6 +68,17 @@ function escapeHTML(input) {
  * @property {InsertFunction} defaultInsert default function for inserting the injection root element into the DOM
  */
 
+/**
+ * @typedef {(searchEngine: SearchEngine, searchTerm: SearchRequest, search: Promise<SuccessSearchResponse>) => void} InjectionFunction function for injecting the results after a search request has been made
+ */
+
+/**
+ * @typedef {(searchEngine: SearchEngine, searchTerm: SearchRequest, search: Promise<SuccessSearchResponse>, injection: InjectionFunction) => void} ScheduleInjectionFunction function scheduling an injection
+ */
+
+/** @description id for the injection container to detect if it already exists */
+const injectionContainerId = "bookmark-list-container";
+
 ///** @type { { [key: string]: InjectionLocation } } */
 const injectionLocations = /** @type {const} */ Object.freeze({
 	/** @type {InjectionLocation} */ top: {
@@ -82,7 +87,18 @@ const injectionLocations = /** @type {const} */ Object.freeze({
 			// add class to injection root element to allow styling based on the location
 			element.classList.add("injection-location-top");
 		},
-		defaultInsert: (injectionRoot, _, injectionElement) => {
+		defaultInsert: async (injectionRoot, _, injectionElement, existingInjectionElement) => {
+			if(existingInjectionElement !== null) {
+				const existingInjectionRoot = existingInjectionElement.parentElement;
+				if(existingInjectionRoot !== null) {
+					// Wait for update after the search before injecting
+					const success = await awaitHydration(existingInjectionRoot, 50, 500);
+					if(!success) {
+						console.debug(`Linkding-Injector: No hydration mutation happened during given timeout`);
+					}
+				}
+			}
+
 			// actually insert the injection root
 			injectionRoot.prepend(injectionElement);
 		},
@@ -96,7 +112,18 @@ const injectionLocations = /** @type {const} */ Object.freeze({
 			// add class to injection root element to allow styling based on the location
 			element.classList.add("injection-location-sidebar");
 		},
-		defaultInsert: (injectionRoot, _, injectionElement) => {
+		defaultInsert: async (injectionRoot, _, injectionElement, existingInjectionElement) => {
+			if(existingInjectionElement !== null) {
+				const existingInjectionRoot = existingInjectionElement.parentElement;
+				if(existingInjectionRoot !== null) {
+					// Wait for update after the search before injecting
+					const success = await awaitHydration(existingInjectionRoot, 50, 500);
+					if(!success) {
+						console.debug(`Linkding-Injector: No hydration mutation happened during given timeout`);
+					}
+				}
+			}
+
 			// actually insert the injection root
 			injectionRoot.prepend(injectionElement);
 		},
@@ -123,6 +150,8 @@ const injectionLocations = /** @type {const} */ Object.freeze({
 /**
  * @typedef {Object} SearchEngine definition for the injection into a search engine
  * @property {"DOMContentLoaded" | "load"} injectionStartEvent event at which we start the actual injection
+ * @property {() => void} registerConsecutiveSearchHandler register an event handler for searches that don't result in a page refresh
+ * @property {() => Element | null} getExistingInjectionElement get an already existing injection element that might be already inserted for consecutive searches
  * @property {string} name name of the search engine
  * @property {(location: Location) => SearchRequest} getSearchTerm function to convert the current window location into a search term
  * @property {(location: Location) => boolean} isMatch check if a window location is on a page of this search engine
@@ -155,18 +184,53 @@ function defaultTryResolveFunction(className, location) {
 			element: injectionRoot,
 			location: location,
 			insert: insertOverride !== null
-				? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement) =>
-					insertOverride(injectionRoot, injectionElement)
+				? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement, /** @type {Element | null} */ existingInjectionElement) =>
+					insertOverride(injectionRoot, injectionElement, existingInjectionElement)
 				: location.defaultInsert
 		});
 	});
 }
+
+/**
+ * @param {Element} root
+ * @param {number} cooldown
+ * @param {number} timeout
+ */
+function awaitHydration(root, cooldown, timeout) {
+	return new Promise((resolve, _) => {
+		/** @type {number | null} */ let activeTimeout = null;
+		const observer = new MutationObserver((_1, _2) => {
+			if(activeTimeout !== null) {
+				window.clearTimeout(activeTimeout);
+			}
+
+			activeTimeout = window.setTimeout(() => {
+				observer.disconnect();
+				resolve(true);
+			}, cooldown);
+		});
+
+		observer.observe(root, {
+			childList: true,
+			subtree: true
+		});
+
+		window.setTimeout(() => {
+			observer.disconnect();
+			resolve(false);
+		}, timeout)
+	});
+};
 
 ///** @type { { [key: string]: SearchEngine } } */
 const searchEngines = /** @type {const} */ Object.freeze({
 	/** @type {SearchEngine} */ duckduckgo: {
 		name: "duckduckgo",
 		injectionStartEvent: "load",
+		registerConsecutiveSearchHandler: () => {},
+		getExistingInjectionElement: () => {
+			return document.querySelector(`#${injectionContainerId}`);
+		},
 		getSearchTerm: (loc) => {
 			// just return the `q` query parameter as a search term
 			const queryString = loc.search;
@@ -207,6 +271,10 @@ const searchEngines = /** @type {const} */ Object.freeze({
 	/** @type {SearchEngine} */ google: {
 		name: "google",
 		injectionStartEvent: "DOMContentLoaded",
+		registerConsecutiveSearchHandler: () => {},
+		getExistingInjectionElement: () => {
+			return document.querySelector(`#${injectionContainerId}`);
+		},
 		getSearchTerm: (loc) => {
 			// just return the `q` query parameter as a search term
 			const queryString = loc.search;
@@ -265,8 +333,8 @@ const searchEngines = /** @type {const} */ Object.freeze({
 						element: injectionRoot,
 						location: injectionLocations.sidebar,
 						insert: insertOverride !== null
-							? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement) =>
-								insertOverride(injectionRoot, injectionElement)
+							? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement, /** @type {Element | null} */ existingInjectionElement) =>
+								insertOverride(injectionRoot, injectionElement, existingInjectionElement)
 							: injectionLocations.sidebar.defaultInsert
 					});
 				});
@@ -282,6 +350,10 @@ const searchEngines = /** @type {const} */ Object.freeze({
 	/** @type {SearchEngine} */ brave: {
 		name: "brave",
 		injectionStartEvent: "load",
+		registerConsecutiveSearchHandler: () => {},
+		getExistingInjectionElement: () => {
+			return document.querySelector(`#${injectionContainerId}`);
+		},
 		getSearchTerm: (loc) => {
 			// just return the `q` query parameter as a search term
 			const queryString = loc.search;
@@ -309,7 +381,7 @@ const searchEngines = /** @type {const} */ Object.freeze({
 		},
 		injectionQueries: [{
 			name: "brave-sidebar",
-			// query for brave sidebar can't to the visibility check
+			// query for brave sidebar can't do the visibility check
 			tryResolve: (/** @type {InsertOverrideFunction | null} */ insertOverride) => new Promise((resolve, _) => {
 				const injectionRoot = document.querySelector("aside.sidebar > .sidebar-content");
 				if(injectionRoot === null) {
@@ -326,42 +398,30 @@ const searchEngines = /** @type {const} */ Object.freeze({
 					element: injectionRoot,
 					location: injectionLocations.sidebar,
 					insert: insertOverride !== null
-						? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement) =>
-							insertOverride(injectionRoot, injectionElement)
+						? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement, /** @type {Element | null} */ existingInjectionElement) =>
+							insertOverride(injectionRoot, injectionElement, existingInjectionElement)
 						: injectionLocations.sidebar.defaultInsert
 				});
 			}),
 			// Brave search detects changes to server-hydrated state and overwrites them one hydration is finished.
 			// So we have to wait for the whole page to load and then for the (hopefully correct) end of hydration before injecting.
-			insertOverride: async (injectionRoot, injectionElement) => {
-				const awaitHydration = (/** @type {Element} */ root, /** @type {number} */ cooldown, /** @type {number} */ timeout) => new Promise((resolve, _) => {
-					/** @type {number | null} */ let activeTimeout = null;
-					const braveObserver = new MutationObserver((_1, _2) => {
-						if(activeTimeout !== null) {
-							window.clearTimeout(activeTimeout);
+			insertOverride: async (injectionRoot, injectionElement, existingInjectionElement) => {
+				if(existingInjectionElement !== null) {
+					const existingInjectionRoot = existingInjectionElement.parentElement;
+					if(existingInjectionRoot !== null) {
+						// Wait for update after the search before injecting
+						const success = await awaitHydration(existingInjectionRoot, 50, 500);
+						if(!success) {
+							console.debug(`Linkding-Injector: No hydration mutation happened during given timeout`);
 						}
-
-						activeTimeout = window.setTimeout(() => {
-							braveObserver.disconnect();
-							resolve(true);
-						}, cooldown);
-					});
-
-					braveObserver.observe(root, {
-						childList: true,
-						subtree: true
-					});
-
-					window.setTimeout(() => {
-						braveObserver.disconnect();
-						resolve(false);
-					}, timeout);
-				});
-
-				const success = await awaitHydration(document.documentElement, 350, 5000);
-				if(!success) {
-					console.debug(`Linkding-Injector: No hydration mutation happened during given timeout`);
+					}
+				} else {
+					const success = await awaitHydration(document.documentElement, 350, 5000);
+					if(!success) {
+						console.debug(`Linkding-Injector: No hydration mutation happened during given timeout`);
+					}
 				}
+
 				console.debug(`Linkding-Injector: injection root inserted`);
 				injectionRoot.prepend(injectionElement);
 			}
@@ -370,6 +430,10 @@ const searchEngines = /** @type {const} */ Object.freeze({
 	/** @type {SearchEngine} */ kagi: {
 		name: "kagi",
 		injectionStartEvent: "DOMContentLoaded",
+		registerConsecutiveSearchHandler: () => {},
+		getExistingInjectionElement: () => {
+			return document.querySelector(`#${injectionContainerId}`);
+		},
 		getSearchTerm: (loc) => {
 			// just return the `q` query parameter as a search term
 			const queryString = loc.search;
@@ -405,6 +469,10 @@ const searchEngines = /** @type {const} */ Object.freeze({
 	/** @type {SearchEngine} */ searx: {
 		name: "searx",
 		injectionStartEvent: "DOMContentLoaded",
+		registerConsecutiveSearchHandler: () => {},
+		getExistingInjectionElement: () => {
+			return document.querySelector(`#${injectionContainerId}`);
+		},
 		getSearchTerm: (_) => {
 			// read the query from the search input element and return it as a search term
 			/** @type {HTMLInputElement | null} */
@@ -443,6 +511,12 @@ const searchEngines = /** @type {const} */ Object.freeze({
 	/** @type {SearchEngine} */ qwant: {
 		name: "qwant",
 		injectionStartEvent: "DOMContentLoaded",
+		registerConsecutiveSearchHandler: () => {
+			window.navigation.addEventListener("currententrychange", (_) => initiateSearchAndInjection(scheduleImmediateInjection));
+		},
+		getExistingInjectionElement: () => {
+			return document.querySelector(`#${injectionContainerId}`);
+		},
 		getSearchTerm: (loc) => {
 			// just return the `q` query parameter as a search term
 			const queryString = loc.search;
@@ -486,8 +560,8 @@ const searchEngines = /** @type {const} */ Object.freeze({
 								element: injectionRoot,
 								location: injectionLocations.sidebar,
 								insert: insertOverride !== null
-									? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement) =>
-										insertOverride(injectionRoot, injectionElement)
+									? (/** @type {Element} */ injectionRoot, /** @type {SearchEngine} */ _, /** @type {Element} */ injectionElement, /** @type {Element | null} */ existingInjectionElement) =>
+										insertOverride(injectionRoot, injectionElement, existingInjectionElement)
 									: injectionLocations.sidebar.defaultInsert
 							});
 						}
@@ -600,9 +674,13 @@ function openOptionsPage() {
 
 /**
  * @descirption event handler for actually injecting our query results (basically our main function)
- * @param {Event} _
+ * @param {SearchEngine} searchEngine the search engine of the current site
+ * @param {SearchRequest} searchTerm the search term we've searched for
+ * @param {Promise<SuccessSearchResponse>} search the linkding API-call
  */
-async function injectResults(_) {
+async function injectResults(searchEngine, searchTerm, search) {
+	const existingInjectionElement = searchEngine.getExistingInjectionElement();
+
 	// find the first successful query result (injection location, element and insert function) for our search engine
 	const injectionQueryResult = await searchEngine.injectionQueries.reduce(async (/** @type {Promise<InjectionContainerQueryResult | Error | null>} */ previousResult, current) => {
 		return previousResult
@@ -654,7 +732,7 @@ async function injectResults(_) {
 		// It might seem kinda weird to use slots without WebComponents/shadow DOM.
 		// However they're used as markers for replaceWith here
 		let htmlString = `
-		<div id="bookmark-list-container" class="${searchEngine}">
+		<div id="${injectionContainerId}" class="${searchEngine}">
 			<div id="navbar">
 				<a id="ld-logo" href="${baseUrl + (searchTerm.length > 0 ? `/bookmarks?q=${encodeURIComponent(searchTerm)}` : "/")}">
 					${showLogo ? `<img src="${logoUri}" class="setup" />` : ""}
@@ -772,7 +850,7 @@ async function injectResults(_) {
 		injectionLocation.transformation(config, injectionElement);
 
 		// actually insert our injection element into the container from the main DOM
-		insertFunction(injectionRoot, searchEngine, injectionElement);
+		insertFunction(injectionRoot, searchEngine, injectionElement, existingInjectionElement);
 	} catch(error) {
 		const config = error.config;
 		const showLogo = config?.showLogo ?? true;
@@ -782,7 +860,7 @@ async function injectResults(_) {
 
 		// base structure of the element we want to inject in an error case
 		const htmlString = `
-		<div id="bookmark-list-container" class="${searchEngine}">
+		<div id="${injectionContainerId}" class="${searchEngine}">
 			<div id="navbar">
 				<a id="ld-logo">
 					${showLogo ? `<img src="${logoUri}" class="setup" />` : ""}
@@ -813,22 +891,64 @@ async function injectResults(_) {
 		injectionLocation.transformation(config, injectionElement);
 
 		// actually insert our (error) injection element into the container from the main DOM
-		insertFunction(injectionRoot, searchEngine, injectionElement);
+		insertFunction(injectionRoot, searchEngine, injectionElement, existingInjectionElement);
 		throw new Error("Linkding-Injector: " + errorMessage);
 	}
 }
 
-// find the search engine
-const searchEngine = getSearchEngine(window.location);
-// then the search term of this search engine
-const searchTerm = searchEngine.getSearchTerm(window.location);
-// and then directly execute the query for our linkding bookmarks
-const search = executeSearch(searchTerm);
-// depending on the search engines settings,
-// once the DOM content is loaded or the whole page is loaded, we actually inject our results
-if(searchEngine.injectionStartEvent === "DOMContentLoaded") {
-	document.addEventListener("DOMContentLoaded", injectResults);
-} else if(searchEngine.injectionStartEvent === "load") {
-	window.addEventListener("load", injectResults);
+/**
+ * @descirption initiation of the search and then scheduling the injection, based on the passed `scheduleInjection`,
+ * which usually schedules it via an event listener for the initial search. Or instantly by just calling it, for consecutive searches
+ * @param {ScheduleInjectionFunction} scheduleInjection
+ */
+function initiateSearchAndInjection(scheduleInjection) {
+	// find the search engine
+	const searchEngine = getSearchEngine(window.location);
+	// then the search term of this search engine
+	const searchTerm = searchEngine.getSearchTerm(window.location);
+	// and then directly execute the query for our linkding bookmarks
+	const search = executeSearch(searchTerm);
+
+	scheduleInjection(searchEngine, searchTerm, search, injectResults);
 }
+
+/**
+ * @descirption initial scheduling of the injection,
+ * that happens either after the documents "DOMContentLoaded event or after the windows "load" event
+ * @param {SearchEngine} searchEngine the search engine of the current site
+ * @param {SearchRequest} searchTerm the search term we've searched for
+ * @param {Promise<SuccessSearchResponse>} search the linkding API-call
+ * @param {InjectionFunction} injection actual function for injection
+ */
+function scheduleInitialInjection(searchEngine, searchTerm, search, injection) {
+	// depending on the search engines settings,
+	// once the DOM content is loaded or the whole page is loaded, we actually inject our results
+	if(searchEngine.injectionStartEvent === "DOMContentLoaded") {
+		document.addEventListener("DOMContentLoaded", (_) => {
+			// register the handler for consecutive searches
+			searchEngine.registerConsecutiveSearchHandler();
+
+			injection(searchEngine, searchTerm, search);
+		});
+	} else if(searchEngine.injectionStartEvent === "load") {
+		window.addEventListener("load", (_) => {
+			// register the handler for consecutive searches
+			searchEngine.registerConsecutiveSearchHandler();
+
+			injection(searchEngine, searchTerm, search)
+		});
+	}
 }
+
+/**
+ * @descirption immediately start the injection, usually used for consecutive searches
+ * @param {SearchEngine} searchEngine the search engine of the current site
+ * @param {SearchRequest} searchTerm the search term we've searched for
+ * @param {Promise<SuccessSearchResponse>} search the linkding API-call
+ * @param {InjectionFunction} injection actual function for injection
+ */
+function scheduleImmediateInjection(searchEngine, searchTerm, search, injection) {
+	injection(searchEngine, searchTerm, search);
+}
+
+initiateSearchAndInjection(scheduleInitialInjection);
